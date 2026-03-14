@@ -11,7 +11,7 @@ SCRAPE_PATHS: list[str] = [
 ]
 
 # ─── Intervalle de vérification ───────────────────────────────────────────────
-CHECK_INTERVAL_SECONDS: int = int(os.getenv("CHECK_INTERVAL_SECONDS", "300"))
+CHECK_INTERVAL_SECONDS: int = int(os.getenv("CHECK_INTERVAL_SECONDS", "900"))
 
 # ─── ntfy.sh ──────────────────────────────────────────────────────────────────
 NTFY_TOPIC: str = os.getenv("NTFY_TOPIC", "")
