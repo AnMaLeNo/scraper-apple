@@ -436,8 +436,8 @@ def main() -> None:
             if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                 notify_failure(str(e), consecutive_failures)
 
-        # ── Jitter : ±60 secondes autour de l'intervalle configuré
-        jitter = random.randint(-60, 60)
+        # ── Jitter : ±120 secondes autour de l'intervalle configuré
+        jitter = random.randint(-120, 120)
         sleep_time = max(30, CHECK_INTERVAL_SECONDS + jitter)  # Minimum 30s
         logger.info("Prochaine vérification dans %ds", sleep_time)
         time.sleep(sleep_time)
