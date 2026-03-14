@@ -1,0 +1,7 @@
+.env
+*.db
+__pycache__/
+*.pyc
+.venv/
+check_macbook.py
+scraper_mac_skill.md

@@ -1,0 +1,11 @@
+services:
+  scraper:
+    build: .
+    container_name: mac-scraper
+    env_file: .env
+    volumes:
+      - scraper-data:/data
+    restart: unless-stopped
+
+volumes:
+  scraper-data:
