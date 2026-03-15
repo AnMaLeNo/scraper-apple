@@ -5,6 +5,7 @@ services:
     env_file: .env
     volumes:
       - scraper-data:/data
+      - ./filter_rules.json:/app/filter_rules.json:ro
     restart: unless-stopped
 
 volumes:
