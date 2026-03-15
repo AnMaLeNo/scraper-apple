@@ -210,66 +210,84 @@ def build_spec_from_config(config: dict) -> NotificationSpecification:
     raise ValueError(f"Type non géré : {spec_type!r}")  # pragma: no cover
 
 
-def load_filter_rules(path: str) -> NotificationSpecification | None:
-    """Charge les règles de filtrage depuis un fichier JSON.
+def load_filter_rules(path: str) -> dict[str, NotificationSpecification]:
+    """Charge la table de routage multicanal depuis un fichier JSON.
+
+    Le fichier doit contenir un dictionnaire {topic → arbre_spec}.
+    Chaque clé est l'identifiant du topic ntfy cible, et la valeur
+    est l'arbre de spécification régissant les critères d'admission.
 
     Returns:
-        L'arbre de spécifications, ou None si le fichier n'existe pas,
-        est vide, ou contient un objet vide {}.
+        Table de routage {topic: spec}. Dictionnaire vide si le fichier
+        n'existe pas, est vide, ou contient un objet vide {}.
     """
     rules_path = Path(path)
 
     if not rules_path.exists():
-        logger.info("Fichier de filtrage absent (%s) — aucun filtre actif", path)
-        return None
+        logger.info("Fichier de routage absent (%s) — aucun canal actif", path)
+        return {}
 
     try:
         raw = rules_path.read_text(encoding="utf-8").strip()
     except OSError as e:
-        logger.warning("Impossible de lire %s : %s — aucun filtre actif", path, e)
-        return None
+        logger.warning("Impossible de lire %s : %s — aucun canal actif", path, e)
+        return {}
 
     if not raw:
-        logger.info("Fichier de filtrage vide (%s) — aucun filtre actif", path)
-        return None
+        logger.info("Fichier de routage vide (%s) — aucun canal actif", path)
+        return {}
 
     config = json.loads(raw)
 
-    if not config or config == {}:
-        logger.info("Règles de filtrage vides (%s) — aucun filtre actif", path)
-        return None
+    if not isinstance(config, dict) or not config:
+        logger.info("Table de routage vide (%s) — aucun canal actif", path)
+        return {}
 
-    spec = build_spec_from_config(config)
-    logger.info("Règles de filtrage chargées : %s", spec)
-    return spec
+    routing_table: dict[str, NotificationSpecification] = {}
+    for topic, spec_config in config.items():
+        routing_table[topic] = build_spec_from_config(spec_config)
+        logger.info("  Canal [%s] → %s", topic, routing_table[topic])
+
+    logger.info("Table de routage chargée : %d canal(aux)", len(routing_table))
+    return routing_table
 
 
 # ────────────────────────────────────────────────────────────────────────────────
-#  ROUTEUR — Content-Based Routing
+#  ROUTEUR — Content-Based Routing (Multiplexage Pub-Sub)
 # ────────────────────────────────────────────────────────────────────────────────
 
 
-def filter_products(
+def route_products(
     products: list[dict],
-    spec: NotificationSpecification | None,
-) -> list[dict]:
-    """Filtre les produits selon la spécification (Content-Based Routing).
+    routing_table: dict[str, NotificationSpecification],
+) -> dict[str, list[dict]]:
+    """Multiplexe les produits vers les canaux de la table de routage.
 
-    Si spec est None, tous les produits sont conservés (pas de filtre actif).
+    Pour chaque produit, évalue is_satisfied_by() de chaque canal.
+    Un produit peut apparaître dans 0, 1 ou N vecteurs de sortie.
+    L'évaluation est purement fonctionnelle : aucune mutation des dicts produit.
+
+    Returns:
+        Dictionnaire {topic: [produits acceptés par ce canal]}.
+        Seuls les canaux ayant au moins un produit sont inclus.
     """
-    if spec is None:
-        return products
+    if not routing_table:
+        return {}
 
-    before = len(products)
-    filtered = [p for p in products if spec.is_satisfied_by(p)]
-    after = len(filtered)
+    routed: dict[str, list[dict]] = {topic: [] for topic in routing_table}
 
-    if before != after:
-        logger.info(
-            "Filtrage : %d → %d produit(s) conservé(s) (%d écarté(s))",
-            before,
-            after,
-            before - after,
-        )
+    for product in products:
+        for topic, spec in routing_table.items():
+            if spec.is_satisfied_by(product):
+                routed[topic].append(product)
 
-    return filtered
+    # Purger les canaux vides et loguer
+    routed = {topic: prods for topic, prods in routed.items() if prods}
+
+    if routed:
+        for topic, prods in routed.items():
+            logger.info("  Routage [%s] : %d produit(s)", topic, len(prods))
+    else:
+        logger.info("  Routage : aucun produit ne correspond à un canal")
+
+    return routed

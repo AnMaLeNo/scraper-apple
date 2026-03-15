@@ -27,7 +27,7 @@ from config import (
     SCRAPE_PATHS,
     logger,
 )
-from filters import filter_products, load_filter_rules
+from filters import load_filter_rules, route_products
 
 # ─── Flag d'arrêt (utilisé par le signal handler) ────────────────────────────
 _shutdown_event = threading.Event()
@@ -239,27 +239,32 @@ def sync_products(scraped: list[dict]) -> tuple[list[dict], list[dict]]:
 #  NOTIFICATIONS (ntfy.sh)
 # ────────────────────────────────────────────────────────────────────────────────
 
-def notify_new_products(new: list[dict], back: list[dict]) -> None:
-    """Envoie des notifications push pour les nouveaux produits / retours en stock."""
-    products_to_notify = [
-        ("[NEW]", p) for p in new
-    ] + [
-        ("[RETOUR]", p) for p in back
-    ]
+def notify_new_products(routed: dict[str, list[dict]]) -> None:
+    """Dispatch les notifications vers les topics issus du routage multicanal.
 
-    if not products_to_notify:
+    Itère sur chaque paire (topic, produits) et envoie les notifications
+    vers le topic ntfy correspondant.
+    """
+    if not routed:
         return
 
-    # Si plus de 5 produits, envoyer un résumé groupé
-    if len(products_to_notify) > 5:
-        _send_grouped_notification(products_to_notify)
-    else:
-        for emoji, product in products_to_notify:
-            _send_single_notification(emoji, product)
+    for topic, products in routed.items():
+        tagged = [("[NEW]", p) for p in products]
+
+        if not tagged:
+            continue
+
+        logger.info("Envoi vers [%s] : %d produit(s)", topic, len(tagged))
+
+        if len(tagged) > 5:
+            _send_grouped_notification(topic, tagged)
+        else:
+            for emoji, product in tagged:
+                _send_single_notification(topic, emoji, product)
 
 
-def _send_single_notification(emoji: str, product: dict) -> None:
-    """Envoie une notification individuelle pour un produit."""
+def _send_single_notification(topic: str, emoji: str, product: dict) -> None:
+    """Envoie une notification individuelle pour un produit vers un topic."""
     title = f"{emoji} Mac Reconditionne"
     price_str = f"{product['price']:.2f} EUR" if product["price"] else "Prix inconnu"
     message = f"{product['title']}\nPrix : {price_str}"
@@ -275,19 +280,19 @@ def _send_single_notification(emoji: str, product: dict) -> None:
 
     try:
         resp = requests.post(
-            f"{NTFY_URL}/{NTFY_TOPIC}",
+            f"{NTFY_URL}/{topic}",
             data=message.encode("utf-8"),
             headers=headers,
             timeout=10,
         )
         resp.raise_for_status()
-        logger.info("Notification envoyée : %s", product["part_number"])
+        logger.info("  [%s] Notification envoyée : %s", topic, product["part_number"])
     except requests.RequestException as e:
-        logger.error("Échec notification pour %s : %s", product["part_number"], e)
+        logger.error("  [%s] Échec notification pour %s : %s", topic, product["part_number"], e)
 
 
-def _send_grouped_notification(products: list[tuple[str, dict]]) -> None:
-    """Envoie une notification résumée pour beaucoup de produits."""
+def _send_grouped_notification(topic: str, products: list[tuple[str, dict]]) -> None:
+    """Envoie une notification résumée pour beaucoup de produits vers un topic."""
     title = f"{len(products)} Mac Reconditionnes detectes"
     lines: list[str] = []
     for emoji, p in products[:15]:  # Limiter à 15 lignes
@@ -299,7 +304,7 @@ def _send_grouped_notification(products: list[tuple[str, dict]]) -> None:
 
     try:
         resp = requests.post(
-            f"{NTFY_URL}/{NTFY_TOPIC}",
+            f"{NTFY_URL}/{topic}",
             data=message.encode("utf-8"),
             headers={
                 "Title": title,
@@ -309,9 +314,9 @@ def _send_grouped_notification(products: list[tuple[str, dict]]) -> None:
             timeout=10,
         )
         resp.raise_for_status()
-        logger.info("Notification groupée envoyée (%d produits)", len(products))
+        logger.info("  [%s] Notification groupée envoyée (%d produits)", topic, len(products))
     except requests.RequestException as e:
-        logger.error("Échec notification groupée : %s", e)
+        logger.error("  [%s] Échec notification groupée : %s", topic, e)
 
 
 def notify_failure(error: str, consecutive_failures: int) -> None:
@@ -370,8 +375,11 @@ def notify_lifecycle(event: str) -> None:
 #  BOUCLE PRINCIPALE
 # ────────────────────────────────────────────────────────────────────────────────
 
-def run_check(is_first_run: bool, spec=None) -> None:
-    """Exécute un cycle complet : scrape → compare → sync → filtre → notifie."""
+def run_check(is_first_run: bool, routing_table=None) -> None:
+    """Exécute un cycle complet : scrape → sync → routage multicanal → notifie."""
+    if routing_table is None:
+        routing_table = {}
+
     products = scrape_all()
 
     if not products:
@@ -387,20 +395,20 @@ def run_check(is_first_run: bool, spec=None) -> None:
         )
         return
 
-    # ── Filtrage basé sur le contenu (Content-Based Routing) ──────────
-    new_products = filter_products(new_products, spec)
-    back_in_stock = filter_products(back_in_stock, spec)
-
-    total_alerts = len(new_products) + len(back_in_stock)
-    if total_alerts > 0:
-        logger.info(
-            "%d nouveau(x), %d retour(s) en stock → envoi de notifications",
-            len(new_products),
-            len(back_in_stock),
-        )
-        notify_new_products(new_products, back_in_stock)
-    else:
+    # ── Routage multicanal (Content-Based Routing + Pub-Sub) ─────────
+    all_to_route = new_products + back_in_stock
+    if not all_to_route:
         logger.info("Aucun changement détecté")
+        return
+
+    logger.info(
+        "%d nouveau(x), %d retour(s) en stock → routage multicanal",
+        len(new_products),
+        len(back_in_stock),
+    )
+
+    routed = route_products(all_to_route, routing_table)
+    notify_new_products(routed)
 
 
 def _handle_shutdown(signum, frame):
@@ -430,12 +438,14 @@ def main() -> None:
 
     init_db()
 
-    # ── Chargement des règles de filtrage ──────────────────────────────
-    spec = load_filter_rules(FILTER_RULES_PATH)
-    if spec is not None:
-        logger.info("  Filtrage  : actif — %s", spec)
+    # ── Chargement de la table de routage multicanal ───────────────────
+    routing_table = load_filter_rules(FILTER_RULES_PATH)
+    if routing_table:
+        logger.info("  Routage   : %d canal(aux) actif(s)", len(routing_table))
+        for topic in routing_table:
+            logger.info("    → %s", topic)
     else:
-        logger.info("  Filtrage  : inactif (aucune règle)")
+        logger.info("  Routage   : aucun canal (pas de notification produit)")
 
     notify_lifecycle("start")
 
@@ -444,7 +454,7 @@ def main() -> None:
 
     while not _shutdown_event.is_set():
         try:
-            run_check(is_first_run, spec=spec)
+            run_check(is_first_run, routing_table=routing_table)
             consecutive_failures = 0  # Reset on success
             is_first_run = False
         except Exception as e:

@@ -1,4 +1,4 @@
-"""Tests unitaires pour le module de filtrage (Specification Pattern)."""
+"""Tests unitaires pour le module de filtrage (Specification Pattern + Routage Multicanal)."""
 
 import json
 from pathlib import Path
@@ -11,8 +11,8 @@ from filters import (
     PartNumberSpec,
     TitleContainsSpec,
     build_spec_from_config,
-    filter_products,
     load_filter_rules,
+    route_products,
 )
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -178,11 +178,8 @@ class TestBuildSpecFromConfig:
             ],
         }
         spec = build_spec_from_config(config)
-        # Cheap Air → prix OK, titre OK → True
         assert spec.is_satisfied_by(CHEAP_MACBOOK_AIR) is True
-        # Expensive Pro → prix KO → False
         assert spec.is_satisfied_by(EXPENSIVE_MACBOOK_PRO) is False
-        # iMac → titre KO → False
         assert spec.is_satisfied_by(IMAC) is False
 
     def test_not_operator(self):
@@ -202,48 +199,87 @@ class TestBuildSpecFromConfig:
         assert spec.is_satisfied_by(IMAC) is False
 
 
-# ── load_filter_rules ────────────────────────────────────────────────────────
+# ── load_filter_rules (table de routage multicanal) ──────────────────────────
 
 
 class TestLoadFilterRules:
-    def test_empty_object_returns_none(self, tmp_path: Path):
+    def test_empty_object_returns_empty_dict(self, tmp_path: Path):
         f = tmp_path / "rules.json"
         f.write_text("{}")
-        assert load_filter_rules(str(f)) is None
+        assert load_filter_rules(str(f)) == {}
 
-    def test_empty_file_returns_none(self, tmp_path: Path):
+    def test_empty_file_returns_empty_dict(self, tmp_path: Path):
         f = tmp_path / "rules.json"
         f.write_text("")
-        assert load_filter_rules(str(f)) is None
+        assert load_filter_rules(str(f)) == {}
 
-    def test_missing_file_returns_none(self, tmp_path: Path):
-        assert load_filter_rules(str(tmp_path / "nope.json")) is None
+    def test_missing_file_returns_empty_dict(self, tmp_path: Path):
+        assert load_filter_rules(str(tmp_path / "nope.json")) == {}
 
-    def test_valid_rules(self, tmp_path: Path):
+    def test_multichannel_rules(self, tmp_path: Path):
+        config = {
+            "topic_budget": {"type": "max_price", "value": 1200},
+            "topic_pro": {"type": "title_contains", "value": "MacBook Pro"},
+        }
         f = tmp_path / "rules.json"
-        f.write_text(json.dumps({"type": "max_price", "value": 1500}))
-        spec = load_filter_rules(str(f))
-        assert spec is not None
-        assert spec.is_satisfied_by(CHEAP_MACBOOK_AIR) is True
-        assert spec.is_satisfied_by(EXPENSIVE_MACBOOK_PRO) is False
+        f.write_text(json.dumps(config))
+        table = load_filter_rules(str(f))
+        assert len(table) == 2
+        assert "topic_budget" in table
+        assert "topic_pro" in table
+        # Vérifier les specs instanciées
+        assert table["topic_budget"].is_satisfied_by(CHEAP_MACBOOK_AIR) is True
+        assert table["topic_budget"].is_satisfied_by(EXPENSIVE_MACBOOK_PRO) is False
+        assert table["topic_pro"].is_satisfied_by(EXPENSIVE_MACBOOK_PRO) is True
+        assert table["topic_pro"].is_satisfied_by(IMAC) is False
 
 
-# ── filter_products (routeur) ────────────────────────────────────────────────
+# ── route_products (routeur multicanal) ──────────────────────────────────────
 
 
-class TestFilterProducts:
-    def test_no_spec_passes_all(self):
-        result = filter_products(ALL_PRODUCTS, None)
-        assert result == ALL_PRODUCTS
+class TestRouteProducts:
+    def test_empty_routing_table(self):
+        result = route_products(ALL_PRODUCTS, {})
+        assert result == {}
 
-    def test_with_spec_filters(self):
-        spec = MaxPriceSpec(1500)
-        result = filter_products(ALL_PRODUCTS, spec)
-        assert CHEAP_MACBOOK_AIR in result
-        assert IMAC in result
-        assert EXPENSIVE_MACBOOK_PRO not in result
-        assert PRODUCT_NO_PRICE not in result
+    def test_empty_products(self):
+        table = {"topic_a": MaxPriceSpec(2000)}
+        result = route_products([], table)
+        assert result == {}
 
-    def test_empty_list(self):
-        spec = MaxPriceSpec(1500)
-        assert filter_products([], spec) == []
+    def test_single_channel(self):
+        table = {"topic_budget": MaxPriceSpec(1500)}
+        result = route_products(ALL_PRODUCTS, table)
+        assert "topic_budget" in result
+        assert CHEAP_MACBOOK_AIR in result["topic_budget"]
+        assert IMAC in result["topic_budget"]
+        assert EXPENSIVE_MACBOOK_PRO not in result["topic_budget"]
+
+    def test_multi_channel_multiplexing(self):
+        """Un produit peut apparaître dans plusieurs canaux."""
+        table = {
+            "topic_budget": MaxPriceSpec(1500),
+            "topic_air": TitleContainsSpec("MacBook Air"),
+        }
+        result = route_products(ALL_PRODUCTS, table)
+        # MacBook Air cheap → dans les deux canaux
+        assert CHEAP_MACBOOK_AIR in result["topic_budget"]
+        assert CHEAP_MACBOOK_AIR in result["topic_air"]
+        # iMac → uniquement budget
+        assert IMAC in result["topic_budget"]
+        assert IMAC not in result.get("topic_air", [])
+        # Pro cher → dans aucun canal
+        assert EXPENSIVE_MACBOOK_PRO not in result.get("topic_budget", [])
+
+    def test_no_match_returns_empty(self):
+        table = {"topic_studio": TitleContainsSpec("Mac Studio")}
+        result = route_products(ALL_PRODUCTS, table)
+        assert result == {}
+
+    def test_idempotence(self):
+        """L'évaluation ne doit pas muter les dicts produit."""
+        import copy
+        products_copy = copy.deepcopy(ALL_PRODUCTS)
+        table = {"t1": MaxPriceSpec(1500), "t2": TitleContainsSpec("MacBook")}
+        route_products(ALL_PRODUCTS, table)
+        assert ALL_PRODUCTS == products_copy
