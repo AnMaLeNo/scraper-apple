@@ -39,4 +39,4 @@ MAX_CONSECUTIVE_FAILURES: int = int(os.getenv("MAX_CONSECUTIVE_FAILURES", "3"))
 
 # ─── Base URL Apple ───────────────────────────────────────────────────────────
 APPLE_BASE_URL: str = "https://www.apple.com/fr/shop/refurbished/mac"
-APPLE_PRODUCT_BASE_URL: str = "https://www.apple.com/fr/shop"
+APPLE_PRODUCT_BASE_URL: str = "https://www.apple.com"

@@ -73,8 +73,10 @@ def scrape_page(path: str = "") -> list[dict]:
         price_info = tile.get("price", {}).get("currentPrice", {})
         price = price_info.get("raw_amount")
         url_path = tile.get("productDetailsUrl", "")
+        # Retirer les query params (?fnode=...) et construire l'URL absolue
+        url_path_clean = url_path.split("?")[0] if url_path else ""
         product_url = (
-            f"{APPLE_PRODUCT_BASE_URL}{url_path}" if url_path else ""
+            f"{APPLE_PRODUCT_BASE_URL}{url_path_clean}" if url_path_clean else ""
         )
         products.append(
             {
