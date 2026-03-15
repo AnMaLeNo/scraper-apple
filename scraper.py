@@ -9,8 +9,7 @@ import random
 import re
 import signal
 import sqlite3
-import sys
-import time
+import threading
 from datetime import datetime, timezone
 
 import requests
@@ -20,12 +19,16 @@ from config import (
     APPLE_PRODUCT_BASE_URL,
     CHECK_INTERVAL_SECONDS,
     DB_PATH,
+    JITTER_SECONDS,
     MAX_CONSECUTIVE_FAILURES,
     NTFY_TOPIC,
     NTFY_URL,
     SCRAPE_PATHS,
     logger,
 )
+
+# ─── Flag d'arrêt (utilisé par le signal handler) ────────────────────────────
+_shutdown_event = threading.Event()
 
 # ─── User-Agent réaliste ─────────────────────────────────────────────────────
 HTTP_HEADERS = {
@@ -395,11 +398,14 @@ def run_check(is_first_run: bool) -> None:
 
 
 def _handle_shutdown(signum, frame):
-    """Gère l'arrêt propre sur SIGTERM / SIGINT."""
+    """Gère l'arrêt propre sur SIGTERM / SIGINT.
+
+    Ne fait que positionner le flag d'arrêt — aucune I/O bloquante ici.
+    Le nettoyage (notification, fermeture BDD) est fait par main().
+    """
     sig_name = signal.Signals(signum).name
-    logger.info("Signal %s reçu — arrêt en cours…", sig_name)
-    notify_lifecycle("stop")
-    sys.exit(0)
+    logger.info("Signal %s reçu — arrêt demandé…", sig_name)
+    _shutdown_event.set()
 
 
 def main() -> None:
@@ -411,7 +417,7 @@ def main() -> None:
     logger.info("═══════════════════════════════════════════════════════")
     logger.info("  Scraper Apple Reconditionnés — Démarrage")
     logger.info("  Topic ntfy : %s", NTFY_TOPIC)
-    logger.info("  Intervalle : %ds (±60s jitter)", CHECK_INTERVAL_SECONDS)
+    logger.info("  Intervalle : %ds (+/-%ds jitter)", CHECK_INTERVAL_SECONDS, JITTER_SECONDS)
     logger.info("  Chemins    : %s", SCRAPE_PATHS or ["(page principale)"])
     logger.info("  BDD        : %s", DB_PATH)
     logger.info("═══════════════════════════════════════════════════════")
@@ -422,7 +428,7 @@ def main() -> None:
     consecutive_failures = 0
     is_first_run = len(get_all_part_numbers()) == 0
 
-    while True:
+    while not _shutdown_event.is_set():
         try:
             run_check(is_first_run)
             consecutive_failures = 0  # Reset on success
@@ -438,11 +444,16 @@ def main() -> None:
             if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                 notify_failure(str(e), consecutive_failures)
 
-        # ── Jitter : ±120 secondes autour de l'intervalle configuré
-        jitter = random.randint(-120, 120)
+        # ── Jitter : fluctuation aléatoire autour de l'intervalle configuré
+        jitter = random.randint(-JITTER_SECONDS, JITTER_SECONDS)
         sleep_time = max(30, CHECK_INTERVAL_SECONDS + jitter)  # Minimum 30s
         logger.info("Prochaine vérification dans %ds", sleep_time)
-        time.sleep(sleep_time)
+        _shutdown_event.wait(timeout=sleep_time)
+
+    # ── Nettoyage après réception du signal d'arrêt ──────────────────────
+    logger.info("Arrêt en cours — envoi notification de fin…")
+    notify_lifecycle("stop")
+    logger.info("Scraper arrêté proprement.")
 
 
 if __name__ == "__main__":
