@@ -19,6 +19,7 @@ from config import (
     APPLE_PRODUCT_BASE_URL,
     CHECK_INTERVAL_SECONDS,
     DB_PATH,
+    FILTER_RULES_PATH,
     JITTER_SECONDS,
     MAX_CONSECUTIVE_FAILURES,
     NTFY_TOPIC,
@@ -26,6 +27,7 @@ from config import (
     SCRAPE_PATHS,
     logger,
 )
+from filters import filter_products, load_filter_rules
 
 # ─── Flag d'arrêt (utilisé par le signal handler) ────────────────────────────
 _shutdown_event = threading.Event()
@@ -368,8 +370,8 @@ def notify_lifecycle(event: str) -> None:
 #  BOUCLE PRINCIPALE
 # ────────────────────────────────────────────────────────────────────────────────
 
-def run_check(is_first_run: bool) -> None:
-    """Exécute un cycle complet : scrape → compare → sync → notifie."""
+def run_check(is_first_run: bool, spec=None) -> None:
+    """Exécute un cycle complet : scrape → compare → sync → filtre → notifie."""
     products = scrape_all()
 
     if not products:
@@ -384,6 +386,10 @@ def run_check(is_first_run: bool) -> None:
             len(products),
         )
         return
+
+    # ── Filtrage basé sur le contenu (Content-Based Routing) ──────────
+    new_products = filter_products(new_products, spec)
+    back_in_stock = filter_products(back_in_stock, spec)
 
     total_alerts = len(new_products) + len(back_in_stock)
     if total_alerts > 0:
@@ -423,6 +429,14 @@ def main() -> None:
     logger.info("═══════════════════════════════════════════════════════")
 
     init_db()
+
+    # ── Chargement des règles de filtrage ──────────────────────────────
+    spec = load_filter_rules(FILTER_RULES_PATH)
+    if spec is not None:
+        logger.info("  Filtrage  : actif — %s", spec)
+    else:
+        logger.info("  Filtrage  : inactif (aucune règle)")
+
     notify_lifecycle("start")
 
     consecutive_failures = 0
@@ -430,7 +444,7 @@ def main() -> None:
 
     while not _shutdown_event.is_set():
         try:
-            run_check(is_first_run)
+            run_check(is_first_run, spec=spec)
             consecutive_failures = 0  # Reset on success
             is_first_run = False
         except Exception as e:

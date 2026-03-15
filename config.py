@@ -43,3 +43,6 @@ JITTER_SECONDS: int = int(os.getenv("JITTER_SECONDS", "120"))
 # ─── Base URL Apple ───────────────────────────────────────────────────────────
 APPLE_BASE_URL: str = "https://www.apple.com/fr/shop/refurbished/mac"
 APPLE_PRODUCT_BASE_URL: str = "https://www.apple.com"
+
+# ─── Filtrage des notifications ───────────────────────────────────────────────
+FILTER_RULES_PATH: str = os.getenv("FILTER_RULES_PATH", "filter_rules.json")
